@@ -22,28 +22,7 @@
 LOG_MODULE_REGISTER(zros_topic);
 
 #include "synapse_shell_print.h"
-//#include "synapse_topic_list.h"
-
-extern struct k_work_q g_low_priority_work_q;
-
-typedef int msg_handler_t(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo);
-void topic_work_handler(struct k_work* work);
-
-typedef struct context_t {
-    struct k_work work_item;
-    const struct shell* sh;
-    struct zros_topic* topic;
-    msg_handler_t* handler;
-    struct k_mutex lock;
-} context_t;
-
-static context_t g_ctx = {
-    .work_item = Z_WORK_INITIALIZER(topic_work_handler),
-    .sh = NULL,
-    .topic = NULL,
-    .handler = NULL,
-    .lock = Z_MUTEX_INITIALIZER(g_ctx.lock)
-};
+#include "synapse_topic_list.h"
 
 #define TOPIC_DICTIONARY()                                                     \
     (actuators, &topic_actuators, "actuators"),                                \
@@ -64,14 +43,7 @@ static context_t g_ctx = {
         (status, &topic_status, "status"),                                     \
         (wheel_odometry, &topic_wheel_odometry, "wheel_odometry")
 
-static volatile bool keep_running = true;
-
-static void shell_callback(const struct shell* sh, uint8_t* data, size_t len)
-{
-    keep_running = false;
-}
-
-static int topic_count_hz(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo)
+int topic_count_hz(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo)
 {
     struct zros_sub sub;
     struct zros_node node;
@@ -153,7 +125,7 @@ static int topic_count_hz(const struct shell* sh, struct zros_topic* topic, void
     return ZROS_OK;
 }
 
-static int topic_echo(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo)
+int topic_echo(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo)
 {
     static char buf[2048] = {};
     struct zros_sub sub;
@@ -166,125 +138,96 @@ static int topic_echo(const struct shell* sh, struct zros_topic* topic, void* ms
     };
     float sample_period = 2.0;
     int rc = 0;
-
-    keep_running = true;
-    shell_print(sh, "press any key to exit");
-    shell_set_bypass(sh, shell_callback);
-
-    while (keep_running) {
-        // limit to 10 hz
-        k_msleep(100);
-        // wait for new message
-        rc = k_poll(events, ARRAY_SIZE(events), K_MSEC(sample_period * 1e3));
-        zros_topic_get_name(topic, name, sizeof(name));
-        if (rc != 0) {
-            LOG_WRN("%s not published.", name);
-            keep_running = false;
+    rc = k_poll(events, ARRAY_SIZE(events), K_MSEC(sample_period * 1e3));
+    zros_topic_get_name(topic, name, sizeof(name));
+    if (rc != 0) {
+        LOG_WRN("%s not published.", name);
+        return -1;
+    } else {
+        if (!zros_sub_update_available(&sub)) {
+            LOG_WRN("%s no update available.", name);
+            return -1;
         } else {
-            if (!zros_sub_update_available(&sub)) {
-                LOG_WRN("%s no update available.", name);
-                keep_running = false;
-            } else {
-                zros_sub_update(&sub);
-                echo(buf, sizeof(buf), msg);
-                shell_print(sh, "%s", buf);
-                memset(buf, 0, sizeof(buf));
-            }
+            zros_sub_update(&sub);
+            echo(buf, sizeof(buf), msg);
+            printf("%s", buf);
+            memset(buf, 0, sizeof(buf));
         }
     }
     zros_sub_fini(&sub);
     zros_node_fini(&node);
-    shell_set_bypass(sh, NULL);
     return ZROS_OK;
 }
 
-void topic_work_handler(struct k_work* work)
+typedef int msg_handler_t(const struct shell* sh, struct zros_topic* topic, void* msg, snprint_t* echo);
+
+int handle_msg(const struct shell* sh, struct zros_topic* topic, msg_handler_t* handler)
 {
-    context_t* ctx = CONTAINER_OF(work, context_t, work_item);
-
-    // lock topic work item
-    ZROS_RC(k_mutex_lock(&ctx->lock, K_MSEC(1000)),
-            LOG_ERR("topic handler busy\n");
-            return );
-
-    const struct shell* sh = ctx->sh;
-    struct zros_topic* topic = ctx->topic;
-    msg_handler_t* handler = ctx->handler;
-
     if (topic == &topic_actuators || topic == &topic_actuators_manual) {
         synapse_msgs_Actuators msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_actuators);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_actuators);
     } else if (topic == &topic_altimeter) {
         synapse_msgs_Altimeter msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_altimeter);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_altimeter);
     } else if (topic == &topic_battery_state) {
         synapse_msgs_BatteryState msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_battery_state);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_battery_state);
     } else if (topic == &topic_bezier_trajectory) {
         synapse_msgs_BezierTrajectory msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_bezier_trajectory);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_bezier_trajectory);
     } else if (topic == &topic_clock_offset) {
         synapse_msgs_Time msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_time);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_time);
     } else if (topic == &topic_cmd_vel) {
         synapse_msgs_Twist msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_twist);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_twist);
     } else if (topic == &topic_status) {
         synapse_msgs_Status msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_status);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_status);
     } else if (topic == &topic_imu) {
         synapse_msgs_Imu msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_imu);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_imu);
     } else if (topic == &topic_joy) {
         synapse_msgs_Joy msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_joy);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_joy);
     } else if (topic == &topic_led_array) {
         synapse_msgs_LEDArray msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_ledarray);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_ledarray);
     } else if (topic == &topic_magnetic_field) {
         synapse_msgs_MagneticField msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_magnetic_field);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_magnetic_field);
     } else if (topic == &topic_nav_sat_fix) {
         synapse_msgs_NavSatFix msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_navsatfix);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_navsatfix);
     } else if (topic == &topic_estimator_odometry || topic == &topic_external_odometry) {
         synapse_msgs_Odometry msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_odometry);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_odometry);
     } else if (topic == &topic_safety) {
         synapse_msgs_Safety msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_safety);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_safety);
     } else if (topic == &topic_wheel_odometry) {
         synapse_msgs_WheelOdometry msg = {};
-        handler(sh, topic, &msg, (snprint_t*)&snprint_wheel_odometry);
+        return handler(sh, topic, &msg, (snprint_t*)&snprint_wheel_odometry);
     } else {
         char name[20];
         zros_topic_get_name(topic, name, sizeof(name));
         shell_print(sh, "%s not handled", name);
     }
-
-    // unlock mutex
-    k_mutex_unlock(&ctx->lock);
-    shell_print(sh, "");
+    return ZROS_OK;
 }
 
 static int cmd_zros_topic_hz(const struct shell* sh,
     size_t argc, char** argv, void* data)
 {
     struct zros_topic* topic = (struct zros_topic*)data;
-    g_ctx.sh = sh;
-    g_ctx.handler = &topic_count_hz;
-    g_ctx.topic = topic;
-    return k_work_submit_to_queue(&g_low_priority_work_q, &g_ctx.work_item);
+    return handle_msg(sh, topic, &topic_count_hz);
 }
 
 static int cmd_zros_topic_echo(const struct shell* sh,
     size_t argc, char** argv, void* data)
 {
     struct zros_topic* topic = (struct zros_topic*)data;
-    g_ctx.sh = sh;
-    g_ctx.handler = &topic_echo;
-    g_ctx.topic = topic;
-    return k_work_submit_to_queue(&g_low_priority_work_q, &g_ctx.work_item);
+    return handle_msg(sh, topic, &topic_echo);
 }
 
 void topic_print_iterator(const struct zros_topic* topic, void* data)
